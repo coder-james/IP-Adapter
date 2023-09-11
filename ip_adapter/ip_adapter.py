@@ -3,6 +3,7 @@ from typing import List
 
 import torch
 from diffusers import StableDiffusionPipeline
+from diffusers.pipelines.controlnet import MultiControlNetModel
 from transformers import CLIPVisionModelWithProjection, CLIPImageProcessor
 from PIL import Image
 
@@ -79,7 +80,11 @@ class IPAdapter:
                 scale=1.0,num_tokens= self.num_tokens).to(self.device, dtype=torch.float16)
         unet.set_attn_processor(attn_procs)
         if hasattr(self.pipe, "controlnet"):
-            self.pipe.controlnet.set_attn_processor(CNAttnProcessor(num_tokens= self.num_tokens))
+            if isinstance(self.pipe.controlnet, MultiControlNetModel):
+                for controlnet in self.pipe.controlnet.nets:
+                    controlnet.set_attn_processor(CNAttnProcessor(num_tokens= self.num_tokens))
+            else:
+                self.pipe.controlnet.set_attn_processor(CNAttnProcessor(num_tokens= self.num_tokens))
         
     def load_ip_adapter(self):
         state_dict = torch.load(self.ip_ckpt, map_location="cpu")
@@ -98,9 +103,37 @@ class IPAdapter:
         return image_prompt_embeds, uncond_image_prompt_embeds
     
     def set_scale(self, scale):
-        for attn_processor in self.pipe.unet.attn_processors.values():
+        #for attn_processor in self.pipe.unet.attn_processors.values():
+        #    if isinstance(attn_processor, IPAttnProcessor):
+        #        attn_processor.scale = scale
+        #down_weight = [0, 0, 0]
+        #mid_weight = 0
+        #up_weight = [0, 0, 0]
+        down_weight = [1, 1, 1]
+        mid_weight = 1
+        up_weight = [1, 1, 1]
+        up_attn_weight = [0.2, 0.2, 0.2]
+        for key, attn_processor in self.pipe.unet.attn_processors.items():
             if isinstance(attn_processor, IPAttnProcessor):
-                attn_processor.scale = scale
+                s = scale
+                if key.startswith("up_blocks."):
+                    for index in range(1, 4):
+                        if key.startswith("up_blocks.{}.".format(index)):
+                            s *= up_weight[index-1]
+                            if index == 1:
+                                for attn_i in range(3):
+                                    if key.startswith('up_blocks.{}.attentions.{}.'.format(index, attn_i)):
+                                        s *= up_attn_weight[attn_i]
+                            break
+                elif key.startswith("down_blocks."):
+                    for index in range(3):
+                        if key.startswith("down_blocks.{}.".format(index)):
+                            s *= down_weight[index]
+                            break
+                elif key.startswith("mid_block."):
+                    s *= mid_weight
+                print("Set Scale ", s, " to ", key)
+                attn_processor.scale = s
         
     def generate(
         self,
